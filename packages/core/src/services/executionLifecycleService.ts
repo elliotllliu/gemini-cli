@@ -58,6 +58,8 @@ export interface ExecutionCompletionOptions {
 
 export interface ExternalExecutionRegistration {
   executionMethod: ExecutionMethod;
+  /** Human-readable label for the background task UI (e.g. the command string). */
+  label?: string;
   initialOutput?: string;
   getBackgroundOutput?: () => string;
   getSubscriptionSnapshot?: () => string | AnsiOutput | undefined;
@@ -78,12 +80,25 @@ export type FormatInjectionFn = (
 
 interface ManagedExecutionBase {
   executionMethod: ExecutionMethod;
+  label?: string;
   output: string;
   backgrounded?: boolean;
   formatInjection?: FormatInjectionFn;
   getBackgroundOutput?: () => string;
   getSubscriptionSnapshot?: () => string | AnsiOutput | undefined;
 }
+
+/**
+ * Payload emitted when an execution is moved to the background.
+ */
+export interface BackgroundStartInfo {
+  executionId: number;
+  executionMethod: ExecutionMethod;
+  label: string;
+  output: string;
+}
+
+export type BackgroundStartListener = (info: BackgroundStartInfo) => void;
 
 /**
  * Payload emitted when a previously-backgrounded execution settles.
@@ -147,6 +162,23 @@ export class ExecutionLifecycleService {
    */
   static setInjectionService(service: InjectionService): void {
     this.injectionService = service;
+  }
+
+  private static backgroundStartListeners = new Set<BackgroundStartListener>();
+
+  /**
+   * Registers a listener that fires when any execution is moved to the background.
+   * This is the hook for the UI to automatically discover backgrounded executions.
+   */
+  static onBackground(listener: BackgroundStartListener): void {
+    this.backgroundStartListeners.add(listener);
+  }
+
+  /**
+   * Unregisters a background start listener.
+   */
+  static offBackground(listener: BackgroundStartListener): void {
+    this.backgroundStartListeners.delete(listener);
   }
 
   /**
@@ -221,6 +253,7 @@ export class ExecutionLifecycleService {
     this.exitedExecutionInfo.clear();
     this.backgroundCompletionListeners.clear();
     this.injectionService = null;
+    this.backgroundStartListeners.clear();
     this.nextExecutionId = NON_PROCESS_EXECUTION_ID_START;
   }
 
@@ -238,6 +271,7 @@ export class ExecutionLifecycleService {
 
     this.activeExecutions.set(executionId, {
       executionMethod: registration.executionMethod,
+      label: registration.label,
       output: registration.initialOutput ?? '',
       kind: 'external',
       getBackgroundOutput: registration.getBackgroundOutput,
@@ -258,11 +292,13 @@ export class ExecutionLifecycleService {
     onKill?: () => void,
     executionMethod: ExecutionMethod = 'none',
     formatInjection?: FormatInjectionFn,
+    label?: string,
   ): ExecutionHandle {
     const executionId = this.allocateExecutionId();
 
     this.activeExecutions.set(executionId, {
       executionMethod,
+      label,
       output: initialOutput,
       kind: 'virtual',
       onKill,
@@ -429,6 +465,18 @@ export class ExecutionLifecycleService {
 
     this.activeResolvers.delete(executionId);
     execution.backgrounded = true;
+
+    // Notify listeners that an execution was moved to the background.
+    const info: BackgroundStartInfo = {
+      executionId,
+      executionMethod: execution.executionMethod,
+      label:
+        execution.label ?? `${execution.executionMethod} (ID: ${executionId})`,
+      output,
+    };
+    for (const listener of this.backgroundStartListeners) {
+      listener(info);
+    }
   }
 
   static subscribe(
