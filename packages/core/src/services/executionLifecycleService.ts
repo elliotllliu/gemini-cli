@@ -66,6 +66,8 @@ export interface ExternalExecutionRegistration {
   writeInput?: (input: string) => void;
   kill?: () => void;
   isActive?: () => boolean;
+  formatInjection?: FormatInjectionFn;
+  completionBehavior?: CompletionBehavior;
 }
 
 /**
@@ -78,12 +80,24 @@ export type FormatInjectionFn = (
   error: Error | null,
 ) => string | null;
 
+/**
+ * Controls what happens when a backgrounded execution completes:
+ * - `'inject'`  — full formatted output is injected into the conversation; task auto-dismisses from UI.
+ * - `'notify'`  — a short pointer (e.g. "output saved to /tmp/...") is injected; task auto-dismisses from UI.
+ * - `'silent'`  — nothing is injected; task stays in the UI until manually dismissed.
+ *
+ * The distinction between `inject` and `notify` is semantic for now (both inject + dismiss),
+ * but enables the system to treat them differently in the future (e.g. LLM-decided injection).
+ */
+export type CompletionBehavior = 'inject' | 'notify' | 'silent';
+
 interface ManagedExecutionBase {
   executionMethod: ExecutionMethod;
   label?: string;
   output: string;
   backgrounded?: boolean;
   formatInjection?: FormatInjectionFn;
+  completionBehavior?: CompletionBehavior;
   getBackgroundOutput?: () => string;
   getSubscriptionSnapshot?: () => string | AnsiOutput | undefined;
 }
@@ -96,6 +110,7 @@ export interface BackgroundStartInfo {
   executionMethod: ExecutionMethod;
   label: string;
   output: string;
+  completionBehavior: CompletionBehavior;
 }
 
 export type BackgroundStartListener = (info: BackgroundStartInfo) => void;
@@ -110,6 +125,7 @@ export interface BackgroundCompletionInfo {
   error: Error | null;
   /** Pre-formatted injection text from the execution creator, or `null` if skipped. */
   injectionText: string | null;
+  completionBehavior: CompletionBehavior;
 }
 
 export type BackgroundCompletionListener = (
@@ -279,6 +295,8 @@ export class ExecutionLifecycleService {
       writeInput: registration.writeInput,
       kill: registration.kill,
       isActive: registration.isActive,
+      formatInjection: registration.formatInjection,
+      completionBehavior: registration.completionBehavior,
     });
 
     return {
@@ -293,6 +311,7 @@ export class ExecutionLifecycleService {
     executionMethod: ExecutionMethod = 'none',
     formatInjection?: FormatInjectionFn,
     label?: string,
+    completionBehavior?: CompletionBehavior,
   ): ExecutionHandle {
     const executionId = this.allocateExecutionId();
 
@@ -303,6 +322,7 @@ export class ExecutionLifecycleService {
       kind: 'virtual',
       onKill,
       formatInjection,
+      completionBehavior,
       getBackgroundOutput: () => {
         const state = this.activeExecutions.get(executionId);
         return state?.output ?? initialOutput;
@@ -360,15 +380,20 @@ export class ExecutionLifecycleService {
 
     // Fire background completion listeners if this was a backgrounded execution.
     if (execution.backgrounded && !result.aborted) {
-      const injectionText = execution.formatInjection
-        ? execution.formatInjection(result.output, result.error)
-        : null;
+      const behavior =
+        execution.completionBehavior ??
+        (execution.formatInjection ? 'inject' : 'silent');
+      const injectionText =
+        behavior !== 'silent' && execution.formatInjection
+          ? execution.formatInjection(result.output, result.error)
+          : null;
       const info: BackgroundCompletionInfo = {
         executionId,
         executionMethod: execution.executionMethod,
         output: result.output,
         error: result.error,
         injectionText,
+        completionBehavior: behavior,
       };
 
       // Inject directly into the model conversation if injection text is
@@ -473,6 +498,9 @@ export class ExecutionLifecycleService {
       label:
         execution.label ?? `${execution.executionMethod} (ID: ${executionId})`,
       output,
+      completionBehavior:
+        execution.completionBehavior ??
+        (execution.formatInjection ? 'inject' : 'silent'),
     };
     for (const listener of this.backgroundStartListeners) {
       listener(info);
