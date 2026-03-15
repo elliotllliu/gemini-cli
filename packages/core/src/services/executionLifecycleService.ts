@@ -6,6 +6,7 @@
 
 import type { InjectionService } from '../config/injectionService.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
+import type { InjectionService } from '../config/injectionService.js';
 
 export type ExecutionMethod =
   | 'lydell-node-pty'
@@ -154,6 +155,16 @@ const NON_PROCESS_EXECUTION_ID_START = 2_000_000_000;
 export class ExecutionLifecycleService {
   private static readonly EXIT_INFO_TTL_MS = 5 * 60 * 1000;
   private static nextExecutionId = NON_PROCESS_EXECUTION_ID_START;
+  private static injectionService: InjectionService | null = null;
+
+  /**
+   * Connects the lifecycle service to the injection service so that
+   * backgrounded executions are reinjected into the model conversation
+   * directly from the backend — no UI hop needed.
+   */
+  static setInjectionService(service: InjectionService): void {
+    this.injectionService = service;
+  }
 
   private static activeExecutions = new Map<number, ManagedExecutionState>();
   private static activeResolvers = new Map<
@@ -270,6 +281,7 @@ export class ExecutionLifecycleService {
     this.backgroundCompletionListeners.clear();
     this.injectionService = null;
     this.backgroundStartListeners.clear();
+    this.injectionService = null;
     this.nextExecutionId = NON_PROCESS_EXECUTION_ID_START;
   }
 
@@ -387,6 +399,15 @@ export class ExecutionLifecycleService {
         behavior !== 'silent' && execution.formatInjection
           ? execution.formatInjection(result.output, result.error)
           : null;
+
+      // Inject directly into the model conversation from the backend.
+      if (injectionText && this.injectionService) {
+        this.injectionService.addInjection(
+          injectionText,
+          'background_completion',
+        );
+      }
+
       const info: BackgroundCompletionInfo = {
         executionId,
         executionMethod: execution.executionMethod,
